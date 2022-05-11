@@ -266,11 +266,11 @@ func (p *processor) processTimeseries(ts *prompb.TimeSeries) (tenant string, err
 	for i, l := range ts.Labels {
 		if l.Name == p.cfg.Tenant.Label {
 			tenant, idx = l.Value, i
-			break
+			continue
 		}
 		if l.Name == p.cfg.Tenant.PerTenantLabel {
 			perTenantLabel = l.Value
-			break
+			continue
 		}
 	}
 
