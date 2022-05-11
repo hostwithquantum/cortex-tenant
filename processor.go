@@ -356,14 +356,17 @@ func (p *processor) close() (err error) {
 func (p *processor) knownTenant(key string) (string, bool) {
 	value, ok := p.tenantRegistry.Load(key)
 	if !ok {
+		p.Logger.Debugf("knownTenant: miss: %s", key)
 		return "", false
 	}
 	entry, ok := value.(*tenantRegistryEntry)
 	if !ok {
 		// key is set, so this should always be an entry,
 		// and we should never get here
+		p.Logger.Errorf("knownTenant: invalid value")
 		return "", false
 	}
+	p.Logger.Debugf("knownTenant: hit: %s => %s", key, entry.Tenant)
 	// update access time
 	entry.LastAccess = time.Now()
 	p.tenantRegistry.Store(key, entry)
@@ -376,18 +379,22 @@ func (p *processor) registerTenant(key, tenant string) {
 		Tenant:     tenant,
 	}
 	p.tenantRegistry.Store(key, &entry)
+	p.Logger.Debugf("registerTenant: storing %s => %s", key, tenant)
 	// expire old entries in the background, so this map doesn't grow forever
 	cutoff := time.Now().Add(-1 * time.Hour)
 	go p.tenantRegistry.Range(func(key, value interface{}) bool {
 		stringKey, ok := key.(string)
 		if !ok {
+			p.Logger.Errorf("registerTenant: expiring: invalid key")
 			return true // ignoring, go on (should never happen, all keys are strings)
 		}
 		entry, ok := value.(*tenantRegistryEntry)
 		if !ok {
+			p.Logger.Errorf("registerTenant: expiring: invalid value")
 			return true // should also never happen, all entries are *tenantRegistryEntry
 		}
 		if entry.LastAccess.Before(cutoff) {
+			p.Logger.Debugf("registerTenant: expiring: deleting %s", stringKey)
 			p.tenantRegistry.Delete(stringKey)
 		}
 		return true
