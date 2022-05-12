@@ -23,7 +23,7 @@ RUN mkdir -p lib64 && cp /lib64/ld-linux-x86-64.so.2 lib64/
 
 RUN mkdir /data && cp /build/deploy/cortex-tenant.yml /data/cortex-tenant.yml
 
-FROM scratch
+FROM alpine
 
 COPY --chown=65534:0 --from=builder /dist /
 
@@ -32,6 +32,5 @@ USER 65534
 
 WORKDIR /data
 
-COPY --from=alpine:latest /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 ENTRYPOINT ["/cortex-tenant"]
 CMD ["-config", "/data/cortex-tenant.yml"]

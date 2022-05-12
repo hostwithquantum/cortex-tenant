@@ -33,6 +33,13 @@ type processor struct {
 	shuttingDown uint32
 
 	logger.Logger
+
+	tenantRegistry sync.Map
+}
+
+type tenantRegistryEntry struct {
+	LastAccess time.Time
+	Tenant     string
 }
 
 func newProcessor(c config) *processor {
@@ -255,19 +262,35 @@ func (p *processor) dispatch(clientIP net.Addr, reqID uuid.UUID, m map[string]*p
 
 func (p *processor) processTimeseries(ts *prompb.TimeSeries) (tenant string, err error) {
 	idx := 0
+	perTenantLabel := ""
 	for i, l := range ts.Labels {
 		if l.Name == p.cfg.Tenant.Label {
 			tenant, idx = l.Value, i
-			break
+			continue
+		}
+		if l.Name == p.cfg.Tenant.PerTenantLabel {
+			perTenantLabel = l.Value
+			continue
 		}
 	}
 
 	if tenant == "" {
+		if perTenantLabel != "" {
+			// tenant unknown but perTenantLabel known => check registry
+			tenant, ok := p.knownTenant(perTenantLabel)
+			if ok {
+				return tenant, nil
+			}
+			// else: go on with original default-tenant logic
+		}
 		if p.cfg.Tenant.Default == "" {
 			return "", fmt.Errorf("label '%s' not found", p.cfg.Tenant.Label)
 		}
 
 		return p.cfg.Tenant.Default, nil
+	} else if perTenantLabel != "" {
+		// tenant and perTenantLabel labels set => register
+		p.registerTenant(perTenantLabel, tenant)
 	}
 
 	if p.cfg.Tenant.LabelRemove {
@@ -322,4 +345,58 @@ func (p *processor) close() (err error) {
 	time.Sleep(p.cfg.TimeoutShutdown)
 	// Shutdown
 	return p.srv.Shutdown()
+}
+
+// Some cadvisor metrics don't contain the k8s pod labels (for example metrics
+// for other processes running under the same pods). We don't really need the
+// labels, but we *do* need the tenant label. So here we save to a map of
+// tenant to some other label (pod name, or whatever is unique per tenant),
+// so we can add the tenant label for containers that don't have them.
+
+func (p *processor) knownTenant(key string) (string, bool) {
+	value, ok := p.tenantRegistry.Load(key)
+	if !ok {
+		p.Logger.Debugf("knownTenant: miss: %s", key)
+		return "", false
+	}
+	entry, ok := value.(*tenantRegistryEntry)
+	if !ok {
+		// key is set, so this should always be an entry,
+		// and we should never get here
+		p.Logger.Errorf("knownTenant: invalid value")
+		return "", false
+	}
+	p.Logger.Debugf("knownTenant: hit: %s => %s", key, entry.Tenant)
+	// update access time
+	entry.LastAccess = time.Now()
+	p.tenantRegistry.Store(key, entry)
+	return entry.Tenant, true
+}
+
+func (p *processor) registerTenant(key, tenant string) {
+	entry := tenantRegistryEntry{
+		LastAccess: time.Now(),
+		Tenant:     tenant,
+	}
+	p.tenantRegistry.Store(key, &entry)
+	p.Logger.Debugf("registerTenant: storing %s => %s", key, tenant)
+	// expire old entries in the background, so this map doesn't grow forever
+	cutoff := time.Now().Add(-1 * time.Hour)
+	go p.tenantRegistry.Range(func(key, value interface{}) bool {
+		stringKey, ok := key.(string)
+		if !ok {
+			p.Logger.Errorf("registerTenant: expiring: invalid key")
+			return true // ignoring, go on (should never happen, all keys are strings)
+		}
+		entry, ok := value.(*tenantRegistryEntry)
+		if !ok {
+			p.Logger.Errorf("registerTenant: expiring: invalid value")
+			return true // should also never happen, all entries are *tenantRegistryEntry
+		}
+		if entry.LastAccess.Before(cutoff) {
+			p.Logger.Debugf("registerTenant: expiring: deleting %s", stringKey)
+			p.tenantRegistry.Delete(stringKey)
+		}
+		return true
+	})
 }
